@@ -1,9 +1,0 @@
-/home/kappa/task1_ws/build/task1/CMakeFiles/uninstall.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/task1_uninstall.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/test.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/edit_cache.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/rebuild_cache.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/list_install_components.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/install.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/install/local.dir
-/home/kappa/task1_ws/build/task1/CMakeFiles/install/strip.dir
