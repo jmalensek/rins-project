@@ -353,8 +353,8 @@ class detect_rings(Node):
 
             self.marker_pub.publish(marker)
             
-            if color not in self.detected_colors:
-                name = color["name"] if color else "unknown"
+            name = color["name"] if color else "unknown"
+            if name not in self.detected_colors:
                 self.detected_colors.add(name)
 
             if len(self.detected_colors) >= 2:
