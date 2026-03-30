@@ -6,11 +6,13 @@ import math
 import tf2_ros
 
 from tf_transformations import euler_from_quaternion
-
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped, Quaternion
+from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import TwistStamped
 from sensor_msgs.msg import LaserScan
-
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Bool
 
 import rclpy
 from rclpy.action import ActionClient
@@ -19,6 +21,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
+
+map_qos = QoSProfile(
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 class RobotExplorer(Node):
 
@@ -36,6 +45,7 @@ class RobotExplorer(Node):
         self.is_docked = None
         self.scan_data = None
         self.map_data = None
+        self.finished_count = 0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -45,7 +55,10 @@ class RobotExplorer(Node):
 
         # Subscribers
         self.create_subscription(LaserScan, 'scan_filtered', self._scanCallback, qos_profile_sensor_data)
-        self.create_subscription(OccupancyGrid, 'map', self._mapCallback, qos_profile_sensor_data)
+        self.create_subscription(OccupancyGrid, 'map', self._mapCallback, map_qos)
+        self.create_subscription(Bool, '/finished', self._finishedCallback, 10)
+
+        self.nav_to_pose_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
         # Initialisation successful
         self.get_logger().info(f"Robot explorer has been initialized!")
@@ -134,64 +147,81 @@ class RobotExplorer(Node):
             self.cmd_vel_pub.publish(stop_msg)
             time.sleep(0.05)
 
-    # NAVIGATION METHODS
-    def find_frontier_direction(self,
-                                num_rays: int = 72,
-                                max_range: float = 10.0,
-                                step: float = 0.05,
-                                occ_thresh: int = 50,
-                                unknown_is_blocked: bool = True) -> tuple[float, float]:
+    def go_to_pose(self, x: float, y: float, yaw: float = 0.0) -> bool:
+        # Wait for Nav2 action server
+        while not self.nav_to_pose_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().info("Waiting for navigate_to_pose action server...")
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = "map"
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
+        goal_pose.pose.position.x = float(x)
+        goal_pose.pose.position.y = float(y)
+        goal_pose.pose.orientation = self._yaw_to_quaternion(yaw)
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = goal_pose
+
+        send_goal_future = self.nav_to_pose_client.send_goal_async(goal_msg)
+        rclpy.spin_until_future_complete(self, send_goal_future)
+        self.goal_handle = send_goal_future.result()
+
+        if self.goal_handle is None or not self.goal_handle.accepted:
+            self.get_logger().warn(f"Goal rejected at ({x:.2f}, {y:.2f})")
+            return False
+
+        self.result_future = self.goal_handle.get_result_async()
+        return True
+
+    def cover_environment(self, waypoints: list[tuple[float, float]]):
+        for x, y in waypoints:
+            self.get_logger(). info(f"Navigating to waypoint ({x:.2f}, {y:.2f})")
+
+            if not self.go_to_pose(x, y):
+                self.get_logger().error(f"Failed to send goal to ({x:.2f}, {y:.2f})")
+                continue
+            
+            if not self.wait_task_done(timeout_sec=360.0):
+                self.get_logger().error(f"Failed to reach ({x:.2f}, {y:.2f}) within timeout")
+            else:
+                self.get_logger().info(f"Successfully reached ({x:.2f}, {y:.2f})")
+
+            # Check if 2 finished signal received
+            if self.finished_count >= 2:
+                self.get_logger().info("Received /finished=True trigger twice, stopping exploration.")
+                break
         
-        if self.map_data is None:
-            self.get_logger().error("No map data available.")
-            return None, None
-
-        if num_rays <= 0:
-            self.get_logger().error("num_rays must be > 0")
-            return None, None
-
-        if step <= 0.0:
-            self.get_logger().error("step must be > 0")
-            return None, None
-        
-        try:
-            t = self.tf_buffer.lookup_transform("map", "base_link", rclpy.time.Time())
-        except tf2_ros.TransformException as exc:
-            self.get_logger().warn(f"TF lookup failed (map->base_link): {exc}")
-            return None, None
-
-        rx = t.transform.translation.x
-        ry = t.transform.translation.y
-        q = t.transform.rotation
-        _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
-
-        best_rel = 0.0
-        best_dist = -1.0
-
-        for i in range(num_rays):
-            rel = -math.pi + (2.0 * math.pi) * (i / num_rays)
-            world_angle = yaw + rel
-
-            d = 0.0
-            while d < max_range:
-                px = rx + d * math.cos(world_angle)
-                py = ry + d * math.sin(world_angle)
-                mp = self._world_to_map(px, py)
-                if mp is None:
-                    break
-                val = self._cell(mp[0], mp[1])
-                if val >= occ_thresh or (unknown_is_blocked and val < 0):
-                    break
-                d += step
-
-            if d > best_dist:
-                best_dist = d
-                best_rel = rel
-        
-        return best_rel, best_dist
-        
-    
     # NAVIGATION HELPER METHODS
+    def get_waypoints_from_map(self, step: float = 1.0) -> list[tuple[float, float]]:
+        if self.map_data is None:
+            self.get_logger().error("Map data not available")
+            return []
+
+        waypoints = []
+        info = self.map_data.info
+        stride = max(1, int(step / info.resolution))
+
+        for my in range(0, info.height, stride):
+            x_iter = range(0, info.width, stride)
+            if (my // stride) % 2 == 1:
+                x_iter = reversed(x_iter)
+            
+            for mx in x_iter:
+                if self._cell(mx, my) == 0:
+                    wx, wy = self._map_to_world(mx, my)
+                    waypoints.append((wx, wy))
+
+        self.get_logger().info(f"Generated {len(waypoints)} waypoints from map with step {step}m")
+        return waypoints
+
+    def _yaw_to_quaternion(self, yaw: float) -> Quaternion:
+        q = Quaternion()
+        q.x = 0.0
+        q.y = 0.0
+        q.z = math.sin(yaw * 0.5)
+        q.w = math.cos(yaw * 0.5)
+        return q
+
     def wait_for_scan_data(self, timeout_sec: float = 5.0) -> bool:
         
         """
@@ -243,6 +273,33 @@ class RobotExplorer(Node):
             return None
         return mx, my
 
+    # UTILITY METHODS
+    def wait_task_done(self, timeout_sec: float = 120.0) -> bool:
+        start = self.get_clock().now()
+        while rclpy.ok():
+            rclpy.spin_until_future_complete(self, self.result_future, timeout_sec=0.2)
+            if self.result_future.done():
+                result = self.result_future.result()
+                if result is None:
+                    return False
+                status = result.status
+                return status == GoalStatus.STATUS_SUCCEEDED
+
+            elapsed = (self.get_clock().now() - start).nanoseconds / 1e9
+            if elapsed > timeout_sec:
+                self.get_logger().warn("Navigation timeout, canceling goal.")
+                if self.goal_handle is not None:
+                    cancel_future = self.goal_handle.cancel_goal_async()
+                    rclpy.spin_until_future_complete(self, cancel_future)
+                return False
+        return False
+
+    def _map_to_world(self, mx: int, my: int) -> tuple[float, float]:
+        info = self.map_data.info
+        wx = info.origin.position.x + (mx + 0.5) * info.resolution
+        wy = info.origin.position.y + (my + 0.5) * info.resolution
+        return wx, wy
+
     # CALLBACKS
     def _scanCallback(self, msg: LaserScan) -> None:
         self.scan_data = msg
@@ -250,37 +307,52 @@ class RobotExplorer(Node):
     def _mapCallback(self, msg: OccupancyGrid) -> None:
         self.map_data = msg
 
+    def _finishedCallback(self, msg: Bool) -> None:
+        if msg.data:
+            self.finished_count += 1
+            #self.get_logger().info(f"Received /finished=True trigger ({self.finished_true_count}/2)")
+
 def main(args = None):
 
-    rclpy.init(args = args)
+    rclpy.init(args=args)
     re = RobotExplorer()
 
-    re.wait_for_scan_data()
-    has_map = re.wait_for_map_data()
+    time.sleep(3.0)
 
-    if not has_map:
-        print("No map data available; cannot compute frontier direction.")
+    if not re.wait_for_map_data(timeout_sec=10.0):
+        re.get_logger().error('Map was not received, aborting.')
         re.destroy_node()
         rclpy.shutdown()
         return
 
+    # hardcoded waypoints for the specific map
+    waypoints = [(2.212346248653394, 0.009680876809087835),
+                (2.1833755802533554, -1.9678722468643208),
+                (1.417301595011825, -2.666432722817975),
+                (1.289321485429959, -3.4529791198569413),
+                (0.12696714192880537, -3.6631788241089063),
+                (0.03727206723370793, -1.5493085954305073),
+                (-0.011229038107887649,-2.3238756805248095),
+                (-1.0622132922149174, -2.411171268639826),
+                (-1.2901576432001445, -1.089920196088445),
+                (-1.7972970814236089, -1.0256533410565287),
+                (-1.9365451987254536, 0.4943115005568502),
+                (-1.1507406707967371, 1.1061146346431132),
+                (0.3933188510497119, 1.2343684129661787),
+                (1.261126302529096, 1.6370923481849204),
+                (0.6003921547337148, 2.6967011040456237),
+                (-2.4022780168470765, 2.4666737072366414),
+                (-2.6826873711016357, 0.7170108058401835)]
+
+    #waypoints = re.get_waypoints_from_map(step=1.0)
+    #print(waypoints)
+    re.cover_environment(waypoints)
+
     while(True):
-        angle, distance = re.find_frontier_direction()
-        if angle is None or distance is None:
-            print("No frontier direction found.")
-        else:
-            print(f"Best frontier direction: angle={math.degrees(angle):.1f} deg, distance={distance:.2f} m")
-            re.turn(angle)
-            re.move_straight(min(distance, 1.0))
+        re.get_logger().info(f"{re.finished_count} /finished=True triggers received. Waiting for 2 to stop exploration.")
 
-    #re.turn(angle)
-    #re.move_straight(distance - 0.5)
-    #re.turn(re.scan_data.angle_max)
-
-    # Shutdown
     re.destroy_node()
     rclpy.shutdown()
-
 
 if __name__=="__main__":
     main()
