@@ -360,9 +360,8 @@ class detect_rings(Node):
             if len(self.detected_colors) >= 2:
                 self.get_logger().info(f"Detected 2 rings with colors: {', '.join(self.detected_colors)}. Publishing finished signal.")
                 self.finished_pub.publish(Bool(data=True))
-                # Optionally, stop further processing or exit
-                # rclpy.shutdown()
-                break
+                self.get_logger().info("Done. Published /finished=True. Shutting down node.")
+                rclpy.shutdown()
     def detect_ring_color(self, cv_image, cx, cy, r):
         h_img, w_img = cv_image.shape[:2]
 
