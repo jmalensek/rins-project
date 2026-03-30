@@ -20,6 +20,8 @@ import subprocess
 from tf2_ros import TransformListener, Buffer, TransformException
 from tf2_geometry_msgs import do_transform_point
 
+from std_msgs.msg import Bool
+
 
 class detect_rings(Node):
 
@@ -40,6 +42,8 @@ class detect_rings(Node):
         self.bridge = CvBridge()
         self.scan = None
 
+        self.detected_colors = set()
+
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -47,6 +51,7 @@ class detect_rings(Node):
         self.pointcloud_sub = self.create_subscription(PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, qos_profile_sensor_data)
 
         self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.RELIABLE)
+        self.finished_pub = self.create_publisher(Bool, "/finished", 10)
 
         self.rings = []
         # clustering
@@ -347,6 +352,17 @@ class detect_rings(Node):
             marker.color.a = 1.0
 
             self.marker_pub.publish(marker)
+            
+            if color not in self.detected_colors:
+                name = color["name"] if color else "unknown"
+                self.detected_colors.add(name)
+
+            if len(self.detected_colors) >= 2:
+                self.get_logger().info(f"Detected 2 rings with colors: {', '.join(self.detected_colors)}. Publishing finished signal.")
+                self.finished_pub.publish(Bool(data=True))
+                # Optionally, stop further processing or exit
+                # rclpy.shutdown()
+                break
     def detect_ring_color(self, cv_image, cx, cy, r):
         h_img, w_img = cv_image.shape[:2]
 
