@@ -25,14 +25,12 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('run_detect_people2', default_value='true', description='Run detect_people2.py'),
         DeclareLaunchArgument('run_detect_rings27', default_value='true', description='Run detect_rings27.py'),
         DeclareLaunchArgument('run_greet_people', default_value='true', description='Run greet_people.py'),
-        DeclareLaunchArgument('run_robot_explorer', default_value='true', description='Run robot_explorer.py')
     ]
 
     nodes = [
         _script_node('detect_people2.py', 'run_detect_people2', namespace),
         _script_node('detect_rings27.py', 'run_detect_rings27', namespace),
         _script_node('greet_people.py', 'run_greet_people', namespace),
-        _script_node('robot_explorer.py', 'run_robot_explorer', namespace)
     ]
 
     return LaunchDescription(args + nodes)
