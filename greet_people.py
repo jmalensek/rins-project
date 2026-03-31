@@ -61,7 +61,7 @@ class greet_people(Node):
     def maybe_start_greeting(self):
         if self.greet_started:
             return
-        if len(self.queue) < self.n_persons or self.finished_true_count < 2:
+        if len(self.queue) < self.n_persons or self.finished_true_count < 3:
             return
         if not self.rc.initial_pose_received:
             self.get_logger().warn(
