@@ -113,6 +113,7 @@ class detect_faces(Node):
 			print(e)
 			
 
+	# xyz moved, xyz1 original
 	def match_person(self, x, y, z):
 		if z > 0.5:
 			return  # not on a fence!
@@ -125,7 +126,7 @@ class detect_faces(Node):
 			xp, yp, zp = np.mean(person_detections, axis=0)
 
 			d = np.linalg.norm([x-xp, y-yp, z-zp])
-			if d < 0.5:
+			if d < 0.6:
 				person_id = p_id  # found a match
 				self.get_logger().info(f"Matched person {person_id}")
 				break
@@ -217,7 +218,7 @@ class detect_faces(Node):
 		try:
 			transform = self.tf_buffer.lookup_transform("map", "base_link", data.header.stamp)
 		except TransformException:
-			self.get_logger().warn("map frame not available yet, skipping detections")
+			#self.get_logger().warn("map frame not available yet, skipping detections")
 			return
 
 
@@ -231,6 +232,7 @@ class detect_faces(Node):
 			#d[2] *= 0.75
 
 			point_stamped = PointStamped()
+
 			point_stamped.header.frame_id = "base_link"
 			point_stamped.header.stamp = data.header.stamp
 			point_stamped.point.x = float(d[0])
@@ -241,28 +243,28 @@ class detect_faces(Node):
 			point_map = do_transform_point(point_stamped, transform)
 
 			# store map coords in df
-			x = float(point_map.point.x)
-			y = float(point_map.point.y)
-			z = float(point_map.point.z)
+			x1 = float(point_map.point.x)
+			y1 = float(point_map.point.y)
+			z1 = float(point_map.point.z)
 
 			# artificially move closer to robot
 			robot_x = transform.transform.translation.x
 			robot_y = transform.transform.translation.y
 			robot_z = transform.transform.translation.z
-			dx = x - robot_x
-			dy = y - robot_y
-			dz = z - robot_z
+			dx = x1 - robot_x
+			dy = y1 - robot_y
+			dz = z1 - robot_z
 
 			#offset = 0.2  # meters
 			dist = np.sqrt(dx**2 + dy**2 + dz**2)
 			if dist > 0:
 				#factor = (dist - offset) / dist
-				factor = 0.9   
+				factor = 0.9 
 				x = robot_x + dx * factor
 				y = robot_y + dy * factor
 				z = robot_z + dz * factor
 
-			self.match_person(x, y, z)
+			self.match_person(x1, y1, z1)
 
 
 
@@ -274,7 +276,11 @@ def main():
 	node = detect_faces()
 	rclpy.spin(node)
 	node.destroy_node()
-	rclpy.shutdown()
-
+	
+	try:
+		rclpy.shutdown()
+	except Exception as e:
+		print(f"Error during shutdown: {e}")
+	
 if __name__ == '__main__':
 	main()
