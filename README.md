@@ -1,1 +1,1 @@
-# rins-project
+# RINS_PROJECT
