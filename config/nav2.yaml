@@ -48,16 +48,16 @@ controller_server:
       rotate_to_heading_angular_vel: 1.8
       transform_tolerance: 0.1
       use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.05
-      approach_velocity_scaling_dist: 0.6
+      min_approach_linear_velocity: 0.05  # Possible tweak to reduce collision safeguards
+      approach_velocity_scaling_dist: 0.6 # Possible tweak to reduce collision safeguards
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
+      max_allowed_time_to_collision_up_to_carrot: 1.0 # Possible tweak to reduce collision safeguards
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.25
       use_cost_regulated_linear_velocity_scaling: false
-      regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.25
+      regulated_linear_scaling_min_radius: 0.9  # Possible tweak to reduce collision safeguards
+      regulated_linear_scaling_min_speed: 0.25  # Possible tweak to reduce collision safeguards
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.785
@@ -87,8 +87,8 @@ local_costmap:
       plugins: ["static_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.45
+        cost_scaling_factor: 4.0  # Possible tweak to reduce collision safeguards
+        inflation_radius: 0.45 # Possible tweak to reduce collision safeguards
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -251,7 +251,7 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "local_costmap/published_footprint"
-      time_before_collision: 1.2
+      time_before_collision: 1.2  # Possible tweak to reduce collision safeguards
       simulation_time_step: 0.1
       min_points: 6
       visualize: False
