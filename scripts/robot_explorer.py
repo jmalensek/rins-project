@@ -5,11 +5,13 @@ import time
 import math
 import tf2_ros
 
-from tf_transformations import euler_from_quaternion
+from collections import deque
+
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
@@ -46,6 +48,9 @@ class RobotExplorer(Node):
         self.scan_data = None
         self.map_data = None
         self.finished_count = 0
+        self.amcl_pose_msg = None
+        self._amcl_window = deque()
+        self.localisation_streak = 0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -55,9 +60,10 @@ class RobotExplorer(Node):
         self.finished_pub = self.create_publisher(Bool, "/finished", 10)
 
         # Subscribers
-        self.create_subscription(LaserScan, 'scan_filtered', self._scanCallback, qos_profile_sensor_data)
-        self.create_subscription(OccupancyGrid, 'map', self._mapCallback, map_qos)
-        self.create_subscription(Bool, '/finished', self._finishedCallback, 10)
+        self.create_subscription(LaserScan, 'scan_filtered', self._scan_callback, qos_profile_sensor_data)
+        self.create_subscription(OccupancyGrid, 'map', self._map_callback, map_qos)
+        self.create_subscription(Bool, '/finished', self._finished_callback, 10)
+        self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_pose_callback, 10)
 
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
@@ -66,17 +72,6 @@ class RobotExplorer(Node):
 
     # BASIC MOTORIC METHODS
     def move_straight(self, distance: float, speed: float = 0.2) -> None:
-
-        """
-        Moves the robot in a straight line for a specified distance at a specified speed.
-        Args:
-            distance(float): meters to move forward
-            speed(float): linear speed in m/s (default: 0.2)
-
-        Returns:
-            None
-        """
-
         if distance <= 0:
             self.get_logger().error("Distance must be positive.")
             return
@@ -104,17 +99,6 @@ class RobotExplorer(Node):
             time.sleep(0.05)
 
     def turn(self, angle: float, angular_speed: float = 0.5):
-
-        """
-        Turns the robot by a specified angle at a specified angular speed.
-        Args:
-            angle(float): angle to turn in radians (positive for counterclockwise, negative for clockwise)
-            angular_speed(float): angular speed in rad/s (default: 0.5)
-        
-        Returns:
-            None
-        """
-
         if angle is None:
             self.get_logger().warn("Turn angle is None; skipping turn command")
             return
@@ -198,13 +182,42 @@ class RobotExplorer(Node):
                 return
 
     # Simple routine to localise the robot on the map
-    def localise_self(self):
+    def localise_self(self, turns: int = 4, wait_time:float = 1.0):
         self.get_logger().info("Starting self-localization procedure...")
 
-        # Test spin 360
-        self.turn(2 *math.pi)
+        while not self.is_localised():
+            self.get_logger().info("Robot localising...")
+
+            angle = (2 * math.pi) / turns
+            for _ in range(turns):
+                self.turn(angle)
+                time.sleep(wait_time)
         
     # NAVIGATION HELPER METHODS
+
+    # Checks whether amcl pose is stable an the robot is well-localised
+    def is_localised(self, pos_threshold: float = 0.2, yaw_threshold: float = 0.2, min_streak: int = 3) -> bool:
+        if self.amcl_pose_msg is None:
+            self.get_logger().warn("AMCL pose not received yet")
+            return False
+        
+        cov = self.amcl_pose_msg.pose.covariance
+        var_x = cov[0]
+        var_y = cov[7]
+        var_yaw = cov[35]
+
+        std_x = math.sqrt(max(var_x, 0.0))
+        std_y = math.sqrt(max(var_y, 0.0))
+        std_yaw = math.sqrt(max(var_yaw, 0.0))
+
+        if std_x < pos_threshold and std_y < pos_threshold and std_yaw < yaw_threshold:
+            self.localisation_streak += 1
+        else:
+            self.localisation_streak = 0
+
+        return self.localisation_streak >= min_streak
+
+    # Divides the map into a grid of points and returns those that are in free space
     def get_waypoints_from_map(self, step: float = 1.0) -> list[tuple[float, float]]:
         if self.map_data is None:
             self.get_logger().error("Map data not available")
@@ -236,14 +249,6 @@ class RobotExplorer(Node):
         return q
 
     def wait_for_scan_data(self, timeout_sec: float = 5.0) -> bool:
-        
-        """
-        Waits until laser scan data is received or a timeout occurs.
-        Args:
-            timeout_sec(float): maximum time to wait for scan data in seconds (default: 5.0)
-        Returns:
-            bool: True if scan data was received, False if timeout occurred
-        """
         start_time = self.get_clock().now()
 
         while rclpy.ok():
@@ -314,16 +319,21 @@ class RobotExplorer(Node):
         return wx, wy
 
     # CALLBACKS
-    def _scanCallback(self, msg: LaserScan) -> None:
+    def _scan_callback(self, msg: LaserScan) -> None:
         self.scan_data = msg
 
-    def _mapCallback(self, msg: OccupancyGrid) -> None:
+    def _map_callback(self, msg: OccupancyGrid) -> None:
         self.map_data = msg
 
-    def _finishedCallback(self, msg: Bool) -> None:
+    def _finished_callback(self, msg: Bool) -> None:
         if msg.data:
             self.finished_count += 1
-            #self.get_logger().info(f"Received /finished=True trigger ({self.finished_true_count}/2)")
+
+    def _amcl_pose_callback(self, msg: PoseWithCovarianceStamped) -> None:
+        self.amcl_pose_msg = msg
+        self._amcl_window.append(msg)
+        if len(self._amcl_window) > 20:
+            self._amcl_window.popleft()
 
 def main(args = None):
 
@@ -339,7 +349,6 @@ def main(args = None):
         return
 
     re.localise_self()
-    #re.go_to_pose(1.8396370262122645, -0.5751383533952286)
 
     # hardcoded waypoints for the specific map
     waypoints = [(1.8396370262122645, -0.5751383533952286),
