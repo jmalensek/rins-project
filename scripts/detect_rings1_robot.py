@@ -15,7 +15,7 @@ from geometry_msgs.msg import PointStamped
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import numpy as np
-import subprocess
+# import subprocess
 
 from tf2_ros import TransformListener, Buffer, TransformException
 from tf2_geometry_msgs import do_transform_point
@@ -197,47 +197,28 @@ class detect_rings(Node):
 
             disc_points = a[abs_ys, abs_xs, :]
 
-            # Remove only NaN — keep inf for now, it carries meaning
-            nan_mask = ~np.isnan(disc_points).any(axis=1)
-            disc_points_with_inf = disc_points[nan_mask]
-            dist_from_center = dist_from_center[nan_mask]
+            # Since there are fewer NaN and inf values now, we can simplify filtering
+            # Keep all points that are finite for position estimation
+            finite_mask = np.isfinite(disc_points).all(axis=1)
+            disc_points_finite = disc_points[finite_mask]
+            dist_from_center_finite = dist_from_center[finite_mask]
 
-            if len(disc_points_with_inf) < 10:
+            if len(disc_points_finite) < 10:
                 continue
 
-            # Count how many center pixels are inf — these are looking through the hole
-            center_mask = dist_from_center <= (radius_px * 0.5)
-            center_points = disc_points_with_inf[center_mask]
-            center_inf_ratio = np.sum(~np.isfinite(center_points[:, 2])) / max(len(center_points), 1)
+            # For ring validation, check if we have enough points in center and edge
+            center_mask = dist_from_center_finite <= (radius_px * 0.5)
+            edge_mask = dist_from_center_finite > (radius_px * 0.5)
 
-            # Count how many edge pixels are finite — these should be the ring material
-            edge_mask = dist_from_center > (radius_px * 0.5)
-            edge_points_with_inf = disc_points_with_inf[edge_mask]
-            edge_finite_ratio = np.sum(np.isfinite(edge_points_with_inf[:, 2])) / max(len(edge_points_with_inf), 1)
+            center_points = disc_points_finite[center_mask]
+            edge_points = disc_points_finite[edge_mask]
 
-            # A real hollow ring: center is mostly inf (hole), edge is mostly finite (ring material)
-            # A flat surface: center is finite, edge is finite → both ratios fail
-            # A missing/far object: everything is inf → edge_finite_ratio fails
-            if center_inf_ratio < 0.3 or edge_finite_ratio < 0.1:
-                #self.get_logger().info(f"c_inf_rati: {center_inf_ratio}      tra drugi: {edge_finite_ratio}")
-
-                # center_inf_ratio < 0.3 → center is not hollow enough → flat surface
-                # edge_finite_ratio < 0.5 → ring material not reliably detected
-                self.get_logger().debug(
-                    f"Ring {i}: rejected — center_inf={center_inf_ratio:.2f}, edge_finite={edge_finite_ratio:.2f}"
-                )
+            # Simplified validation: ensure we have some points in both center and edge
+            if len(center_points) < 2 or len(edge_points) < 2:
+                self.get_logger().debug(f"Ring {i}: rejected — insufficient points in center ({len(center_points)}) or edge ({len(edge_points)})")
                 continue
 
-            # Now filter to only finite points for position estimate
-            finite_mask = np.isfinite(disc_points_with_inf).all(axis=1)
-            edge_points = disc_points_with_inf[edge_mask & finite_mask]
-
-            #self.get_logger().info(f"Edge points")
-
-
-            if len(edge_points) < 4:
-                continue
-
+            # Use median of edge points for ring position (assuming edge represents the ring surface)
             ring_point = np.median(edge_points, axis=0)
 
             # Transform point from point cloud frame to map
@@ -271,8 +252,6 @@ class detect_rings(Node):
             centroid = np.array(cluster["centroid"])
             # Match in XY to reduce depth-noise splitting of the same physical ring
             distance = np.linalg.norm(new_point[:2] - centroid[:2])
-
-            # time_dur = cluster["last_seen"] - now_sec
             
             self.get_logger().info(f"Distance {distance}.")
 
@@ -397,47 +376,22 @@ class detect_rings(Node):
         for label in labels:
             counts[label] = counts.get(label, 0) + 1
 
+        # Filter to only ring colors: red, green, blue, black
+        ring_colors = {"red", "green", "blue", "black"}
+        ring_counts = {color: counts.get(color, 0) for color in ring_colors}
 
-        # so we have a bounding box and we count the colored pixels by color
-        # we suspect,. that over 50% of pixel are background
-        # we take the second most dominant color, thats not too similar to the background
-        sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
-        dominant_name, dominant_count = sorted_counts[0]
-        dominant_ratio = dominant_count / len(labels)
-
-        class_medians = {}
-        for class_name, _ in sorted_counts:
-            class_pixels = np.array([pix for pix, label in zip(pixels, labels) if label == class_name])
-            if class_pixels.size == 0:
-                continue
-            class_medians[class_name] = np.median(class_pixels, axis=0)
-
-        selected_name = dominant_name
-
-        # If dominant class is likely background, pick the strongest alternative
-        # that is not too close to background color in LAB space.
-        if dominant_ratio > 0.5:
-            dominant_lab = class_medians.get(dominant_name)
-            min_lab_distance = 20.0
-            min_secondary_ratio = 0.05
-
-            for class_name, class_count in sorted_counts[1:]:
-                candidate_ratio = class_count / len(labels)
-                if candidate_ratio < min_secondary_ratio:
-                    continue
-
-                candidate_lab = class_medians.get(class_name)
-                if dominant_lab is None or candidate_lab is None:
-                    continue
-
-                lab_distance = np.linalg.norm(candidate_lab - dominant_lab)
-                if lab_distance >= min_lab_distance:
-                    selected_name = class_name
-                    break
-
-        selected_lab = class_medians.get(selected_name)
-        if selected_lab is None:
+        # Select the most common ring color
+        if not ring_counts or max(ring_counts.values()) == 0:
             return None
+
+        selected_name = max(ring_counts, key=ring_counts.get)
+
+        # Get the median LAB for the selected color
+        class_pixels = np.array([pix for pix, label in zip(pixels, labels) if label == selected_name])
+        if class_pixels.size == 0:
+            return None
+
+        selected_lab = np.median(class_pixels, axis=0)
 
         return {
             "lab": selected_lab.tolist(),
@@ -446,27 +400,27 @@ class detect_rings(Node):
 
 
     def classify_lab(self, L, A, B):
-        # Chroma = distance from the grey axis in the AB plane
-        # Low chroma = achromatic (black / grey / white)
+        # Simplified classification for only blue, green, red, and black rings
         chroma = np.sqrt(A ** 2 + B ** 2)
 
         if chroma < 15:
-            # Achromatic — classify purely by lightness
-            if L < 25:      return "black"
-            elif L < 70:    return "grey"
-            else:           return "white"
+            # Achromatic — only classify as black if very dark
+            if L < 25:
+                return "black"
+            else:
+                return "unknown"
 
         # Chromatic — hue angle in LAB (atan2 of B over A)
         hue = np.degrees(np.arctan2(B, A)) % 360
 
-        if hue < 15 or hue >= 345:     return "red"
-        elif hue < 45:                  return "orange"
-        elif hue < 75:                  return "yellow"
-        elif hue < 150:                 return "green"
-        elif hue < 195:                 return "cyan"
-        elif hue < 255:                 return "blue"
-        elif hue < 285:                 return "purple"
-        else:                           return "magenta"
+        if hue < 15 or hue >= 345:
+            return "red"
+        elif hue >= 75 and hue < 150:
+            return "green"
+        elif hue >= 195 and hue < 255:
+            return "blue"
+        else:
+            return "unknown"
 
 
     def lab_to_marker_rgb(self, lab):
