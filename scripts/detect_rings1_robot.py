@@ -6,8 +6,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
 
-from sensor_msgs.msg import Image, PointCloud2
-from sensor_msgs_py import point_cloud2 as pc2
+from sensor_msgs.msg import Image, CameraInfo
 
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import PointStamped
@@ -40,7 +39,15 @@ class detect_rings(Node):
         self.device = self.get_parameter('device').get_parameter_value().string_value
 
         self.bridge = CvBridge()
-        self.scan = None
+        self.depth_image = None
+        self.depth_frame_id = None
+        self.depth_stamp = None
+        self.depth_fx = None
+        self.depth_fy = None
+        self.depth_cx = None
+        self.depth_cy = None
+        self.rgb_w = None
+        self.rgb_h = None
 
         self.detected_colors = set()
 
@@ -49,7 +56,9 @@ class detect_rings(Node):
 
         # ZA SPREMENIT TA RGB IMAGE IN DEPTH IMAGE - V DIS_TUTORIAL6 SO MOŽNI TOPICI
         self.rgb_image_sub = self.create_subscription(Image, "/gemini/color/image_raw", self.rgb_callback, qos_profile_sensor_data)
-        self.pointcloud_sub = self.create_subscription(PointCloud2, "/gemini/depth/points", self.pointcloud_callback, qos_profile_sensor_data)
+        self.depth_image_sub = self.create_subscription(Image, "/gemini/depth/image_raw", self.depth_callback, qos_profile_sensor_data)
+        self.depth_info_sub = self.create_subscription(CameraInfo, "/gemini/depth/camera_info", self.depth_info_callback, qos_profile_sensor_data)
+        self.get_logger().info("Subscribed to RGB image and depth image topics.")
 
         # ZA DODAT PUBLISHERHJA NA /SPEAK TOPIC, ???
         self.speaking_pub = self.create_publisher(String, "/speak", 10)
@@ -60,9 +69,9 @@ class detect_rings(Node):
         self.rings = []
         # clustering
         self.ring_clusters = []
-        self.cluster_threshold = 0.20  # 20 centimers
+        self.cluster_threshold = 0.50  # 50 centimers
 
-        self.min_detections = 3  # min hits before publishing a marker
+        self.min_detections = 25  # min hits before publishing a marker
 
         self.ema_alpha = 0.1  # EMA smoothing factor for centroid
 
@@ -81,10 +90,12 @@ class detect_rings(Node):
             '''
 
     def rgb_callback(self, data):
+        # self.get_logger().info("Received RGB image, running ring detection...")
         self.rings = []
 
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+            self.rgb_h, self.rgb_w = cv_image.shape[:2]
 
             #self.get_logger().info(f"Running Hough Circle detection...")
 
@@ -102,7 +113,7 @@ class detect_rings(Node):
                 exit()
 
             circles = cv2.HoughCircles(gray_upper, cv2.HOUGH_GRADIENT, dp=1.0, minDist=50,
-                                     param1=30, param2=30, minRadius=3, maxRadius=200)  # params could be changed
+                                     param1=200, param2=45, minRadius=3, maxRadius=100)  # params could be changed
 # maybe change param2 si it would depend also on radius? smaller radius -> smaller threshold for detection?
             if circles is not None:
                 circles_draw = np.uint16(np.around(circles[0, :]))
@@ -145,6 +156,7 @@ class detect_rings(Node):
                         cv2.putText(cv_image, color['name'], (cx - r, cy - r - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     self.rings.append((cx, cy, r, color))
+                    self.process_ring_center(cx, cy, r, color)
 
             cv2.imshow("rings", cv_image)
             key = cv2.waitKey(1)
@@ -156,91 +168,87 @@ class detect_rings(Node):
             print(e)
 
 
+    def depth_callback(self, msg):
+        self.depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        self.depth_frame_id = msg.header.frame_id
+        self.depth_stamp = msg.header.stamp
 
-    # TA DEL JE ZDEJ FUL QUESTIONABLE
-    def pointcloud_callback(self, data):
+    def depth_info_callback(self, msg):
+        self.depth_fx = float(msg.k[0])
+        self.depth_fy = float(msg.k[4])
+        self.depth_cx = float(msg.k[2])
+        self.depth_cy = float(msg.k[5])
 
-        # get point cloud attributes
-        height = data.height
-        width = data.width
+    def process_ring_center(self, cx, cy, r, color):
+        if self.depth_image is None or self.depth_frame_id is None:
+            self.get_logger().warn("Depth image not available yet; skipping ring")
+            return
+        if self.depth_fx is None or self.depth_fy is None or self.depth_cx is None or self.depth_cy is None:
+            self.get_logger().warn("Depth camera info not available yet; skipping ring")
+            return
 
-        # get 3-channel representation of the point cloud in numpy format once
-        a = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
-        a = a.reshape((height, width, 3))
+        depth_h, depth_w = self.depth_image.shape[:2]
 
-        source_frame = data.header.frame_id if data.header.frame_id else "base_link"
+        # rgb and depth are aligned only by resolution scaling here
+        # use the latest depth image to sample the ring center depth
+        rgb_w = self.rgb_w if self.rgb_w else depth_w
+        rgb_h = self.rgb_h if self.rgb_h else depth_h
+        dx = int(cx * (depth_w / float(rgb_w)))
+        dy = int(cy * (depth_h / float(rgb_h)))
+        if dx < 0 or dx >= depth_w or dy < 0 or dy >= depth_h:
+            return
 
-        # iterate over ring coordinates
-        for i, (x, y, r, color) in enumerate(self.rings):
-            # maybe needed a bounds check
+        depth_value = self._get_valid_depth(dx, dy, r)
+        if depth_value is None:
+            self.get_logger().warn("Could not get valid depth near ring rim")
+            return
 
-            if not (0 <= x < width and 0 <= y < height):
-                continue
+        x_cam = (dx - self.depth_cx) * depth_value / self.depth_fx
+        y_cam = (dy - self.depth_cy) * depth_value / self.depth_fy
+        z_cam = depth_value
 
-            radius_px = max(4, int(0.9 * r))
+        point_depth = PointStamped()
+        point_depth.header.frame_id = self.depth_frame_id
+        point_depth.header.stamp = self.depth_stamp if self.depth_stamp is not None else self.get_clock().now().to_msg()
+        point_depth.point.x = float(x_cam)
+        point_depth.point.y = float(y_cam)
+        point_depth.point.z = float(z_cam)
 
-            ys_off, xs_off = np.mgrid[-radius_px:radius_px+1, -radius_px:radius_px+1]
-            within_circle = (xs_off**2 + ys_off**2) <= radius_px**2
+        try:
+            transform = self.tf_buffer.lookup_transform("map", self.depth_frame_id, point_depth.header.stamp)
+            point_map = do_transform_point(point_depth, transform)
+        except Exception as ex:
+            self.get_logger().warn(f"map frame not available yet, skipping ring: {ex}")
+            return
 
-            abs_xs = x + xs_off[within_circle]
-            abs_ys = y + ys_off[within_circle]
-            dist_from_center = np.sqrt(xs_off[within_circle]**2 + ys_off[within_circle]**2)
+        map_x = float(point_map.point.x)
+        map_y = float(point_map.point.y)
+        map_z = float(point_map.point.z)
+        self.get_logger().info(f"Ring {color['name'] if color else 'unknown'} at map coordinates: ({map_x:.2f}, {map_y:.2f})")
+        self.add_to_clusters(map_x, map_y, map_z, color)
 
-            valid = (abs_xs >= 0) & (abs_xs < width) & (abs_ys >= 0) & (abs_ys < height)
-            abs_xs = abs_xs[valid]
-            abs_ys = abs_ys[valid]
-            dist_from_center = dist_from_center[valid]
+    def _get_valid_depth(self, depth_dx, depth_dy, ring_radius, window_radius=6):
+        depth_h, depth_w = self.depth_image.shape[:2]
+        values = []
+        outer_radius = max(window_radius, int(1.1 * ring_radius))
+        inner_radius = max(2, int(0.45 * ring_radius))
 
+        for row in range(max(0, depth_dy - outer_radius), min(depth_h, depth_dy + outer_radius + 1)):
+            for col in range(max(0, depth_dx - outer_radius), min(depth_w, depth_dx + outer_radius + 1)):
+                dist = np.hypot(col - depth_dx, row - depth_dy)
+                if dist < inner_radius or dist > outer_radius:
+                    continue
+                depth_value = float(self.depth_image[row, col])
+                if not np.isfinite(depth_value) or depth_value <= 0.0:
+                    continue
+                if depth_value > 20.0:
+                    depth_value /= 1000.0
+                values.append(depth_value)
 
-            if len(abs_xs) < 10:
-                continue
+        if not values:
+            return None
 
-            disc_points = a[abs_ys, abs_xs, :]
-
-            # Since there are fewer NaN and inf values now, we can simplify filtering
-            # Keep all points that are finite for position estimation
-            finite_mask = np.isfinite(disc_points).all(axis=1)
-            disc_points_finite = disc_points[finite_mask]
-            dist_from_center_finite = dist_from_center[finite_mask]
-
-            if len(disc_points_finite) < 10:
-                continue
-
-            # For ring validation, check if we have enough points in center and edge
-            center_mask = dist_from_center_finite <= (radius_px * 0.5)
-            edge_mask = dist_from_center_finite > (radius_px * 0.5)
-
-            center_points = disc_points_finite[center_mask]
-            edge_points = disc_points_finite[edge_mask]
-
-            # Simplified validation: ensure we have some points in both center and edge
-            if len(center_points) < 2 or len(edge_points) < 2:
-                self.get_logger().debug(f"Ring {i}: rejected — insufficient points in center ({len(center_points)}) or edge ({len(edge_points)})")
-                continue
-
-            # Use median of edge points for ring position (assuming edge represents the ring surface)
-            ring_point = np.median(edge_points, axis=0)
-
-            # Transform point from point cloud frame to map
-            point_stamped = PointStamped()
-            point_stamped.header.frame_id = source_frame
-            point_stamped.header.stamp = data.header.stamp
-            point_stamped.point.x = float(ring_point[0])
-            point_stamped.point.y = float(ring_point[1])
-            point_stamped.point.z = float(ring_point[2])
-
-            try:
-                # Transform to map frame
-                transform = self.tf_buffer.lookup_transform("map", source_frame, data.header.stamp)
-                point_map = do_transform_point(point_stamped, transform)
-
-                map_x = point_map.point.x
-                map_y = point_map.point.y
-                map_z = point_map.point.z
-
-                self.add_to_clusters(map_x, map_y, map_z, color)
-            except TransformException:
-                self.get_logger().warn("map frame not available yet, skipping ring")
+        return float(np.median(values))
 
 
             
@@ -253,14 +261,14 @@ class detect_rings(Node):
             # Match in XY to reduce depth-noise splitting of the same physical ring
             distance = np.linalg.norm(new_point[:2] - centroid[:2])
             
-            self.get_logger().info(f"Distance {distance}.")
+            # self.get_logger().info(f"Distance {distance}.")
 
 
             if distance < self.cluster_threshold:
                 cluster["count"] += 1
                 cluster["last_seen"] = now_sec
 
-                if cluster["count"] == 3 and not cluster.get("spoken", False):
+                if cluster["count"] == self.min_detections and not cluster.get("spoken", True):
                     name = (cluster.get("color") or {}).get("name", "unknown")
                     
                     self.speaking_pub.publish(String(data=f"{name} ring"))
@@ -343,8 +351,8 @@ class detect_rings(Node):
             if name not in self.detected_colors:
                 self.detected_colors.add(name)
 
-            if len(self.detected_colors) >= 4:
-                self.get_logger().info(f"Detected 2 rings with colors: {', '.join(self.detected_colors)}. Publishing finished signal.")
+            if len(self.detected_colors) >= 10:
+                self.get_logger().info(f"Detected 4 rings with colors: {', '.join(self.detected_colors)}. Publishing finished signal.")
                 self.finished_pub.publish(Bool(data=True))
                 self.get_logger().info("Done. Published /finished=True. Shutting down node.")
 
@@ -403,9 +411,11 @@ class detect_rings(Node):
         # Simplified classification for only blue, green, red, and black rings
         chroma = np.sqrt(A ** 2 + B ** 2)
 
-        if chroma < 15:
+        # self.get_logger().info(f"Classifying color with L={L:.1f}, A={A:.1f}, B={B:.1f}, chroma={chroma:.1f}")
+
+        if chroma < 5:
             # Achromatic — only classify as black if very dark
-            if L < 25:
+            if L < 20:
                 return "black"
             else:
                 return "unknown"
@@ -417,7 +427,7 @@ class detect_rings(Node):
             return "red"
         elif hue >= 75 and hue < 150:
             return "green"
-        elif hue >= 195 and hue < 255:
+        elif hue >= 150 and hue < 255:
             return "blue"
         else:
             return "unknown"
