@@ -174,13 +174,26 @@ class RobotExplorer(Node):
     # NAVIGATION METHODS
 
     # Sequentially visits a set of waypoints on a provided map
-    def cover_environment(self, waypoints: list[tuple[float, float]], turns: int = 4, angular_speed: float = 0.5, wait_time: float = 1.0) -> None:
-        for x, y in waypoints:
-            self.get_logger(). info(f"Navigating to waypoint ({x:.2f}, {y:.2f})")
+    def cover_waypoints(self, waypoints: list[tuple[float, float]], turns: int = 4, angular_speed: float = 0.5, wait_time: float = 1.0) -> None:
+        for index, (x, y) in enumerate(waypoints):
 
+            # Compute the yaw angle to face at the next waypoint
+            yaw = 0.0
+            if index < len(waypoints) - 1:
+                next_x, next_y = waypoints[index + 1]
+                yaw = math.atan2(next_y - y, next_x - x)
+            elif index > 0:
+                prev_x, prev_y = waypoints[index - 1]
+                yaw = math.atan2(y - prev_y, x - prev_x)
+
+            self.get_logger(). info(f"Navigating to waypoint ({x:.2f}, {y:.2f}) with yaw {yaw:.2f} rad")
+
+            # Rotate to help with localisation
             self.rotate(turns, angular_speed, wait_time)
 
-            if not self.go_to_pose(x, y):
+            # Compute the yaw for the next
+
+            if not self.go_to_pose(x, y, yaw):
                 self.get_logger().error(f"Failed to send goal to ({x:.2f}, {y:.2f})")
                 continue
             
@@ -394,7 +407,7 @@ def main(args = None):
                     (-3.3163698668480146, -1.275044404810225)]
 
     #re.rotate(turns=4, angular_speed=0.5, wait_time=1.0)
-    re.cover_environment(waypoints_irl)
+    re.cover_waypoints(waypoints_irl)
     re.get_logger().info("Exploration complete, shutting down.")
     re.destroy_node()
     rclpy.shutdown()
