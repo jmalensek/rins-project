@@ -71,6 +71,8 @@ class RobotExplorer(Node):
         self.get_logger().info(f"Robot explorer has been initialized!")
 
     # BASIC MOTORIC METHODS
+
+    # Moves the robot straight for a given distance at a given speed
     def move_straight(self, distance: float, speed: float = 0.2) -> None:
         if distance <= 0:
             self.get_logger().error("Distance must be positive.")
@@ -98,7 +100,8 @@ class RobotExplorer(Node):
             self.cmd_vel_pub.publish(stop_msg)
             time.sleep(0.05)
 
-    def turn(self, angle: float, angular_speed: float = 0.5):
+    # Turns the robot in place by a given angle (in radians) at a given angular speed
+    def turn(self, angle: float, angular_speed: float = 0.5) -> None:
         if angle is None:
             self.get_logger().warn("Turn angle is None; skipping turn command")
             return
@@ -132,6 +135,7 @@ class RobotExplorer(Node):
             self.cmd_vel_pub.publish(stop_msg)
             time.sleep(0.05)
 
+    # Moves the robot to a specific pose on the map using Nav2's navigate_to_pose action
     def go_to_pose(self, x: float, y: float, yaw: float = 0.0) -> bool:
         # Wait for Nav2 action server
         while not self.nav_to_pose_client.wait_for_server(timeout_sec=1.0):
@@ -159,7 +163,7 @@ class RobotExplorer(Node):
         self.get_logger().info(f"Goal accepted, navigating to ({x:.2f}, {y:.2f})")
         return True
 
-    # NAVIGATION METHDOS
+    # NAVIGATION METHODS
 
     # Sequentially visits a set of waypoints on a provided map
     def cover_environment(self, waypoints: list[tuple[float, float]]):
@@ -182,7 +186,7 @@ class RobotExplorer(Node):
                 return
 
     # Simple routine to localise the robot on the map
-    def localise_self(self, turns: int = 4, wait_time:float = 1.0):
+    def localise_self(self, turns: int = 4, wait_time:float = 1.0) -> None:
         self.get_logger().info("Starting self-localization procedure...")
 
         while not self.is_localised():
@@ -240,6 +244,7 @@ class RobotExplorer(Node):
         self.get_logger().info(f"Generated {len(waypoints)} waypoints from map with step {step}m")
         return waypoints
 
+    # Helper method to convert yaw angle to quaternion for goal pose
     def _yaw_to_quaternion(self, yaw: float) -> Quaternion:
         q = Quaternion()
         q.x = 0.0
@@ -248,6 +253,7 @@ class RobotExplorer(Node):
         q.w = math.cos(yaw * 0.5)
         return q
 
+    # Waits for scan data to be received, with a timeout
     def wait_for_scan_data(self, timeout_sec: float = 5.0) -> bool:
         start_time = self.get_clock().now()
 
@@ -262,6 +268,7 @@ class RobotExplorer(Node):
 
             rclpy.spin_once(self, timeout_sec=0.1)
 
+    # Waits for map data to be received, with a timeout
     def wait_for_map_data(self, timeout_sec: float = 5.0) -> bool:
         start_time = self.get_clock().now()
 
@@ -276,10 +283,12 @@ class RobotExplorer(Node):
 
             rclpy.spin_once(self, timeout_sec=0.1)
 
+    # Helper method to get the occupancy value of a cell in the map
     def _cell(self, mx: int, my: int) -> int:
         w = self.map_data.info.width
         return self.map_data.data[my * w + mx]
     
+    # Helper method to convert world coordinates to map cell indices
     def _world_to_map(self, x: float, y: float) -> tuple[int, int]:
         info = self.map_data.info
         ox = info.origin.position.x
@@ -292,6 +301,8 @@ class RobotExplorer(Node):
         return mx, my
 
     # UTILITY METHODS
+
+    # Waits for the current navigation task to complete, with a timeout, and returns whether it succeeded
     def wait_task_done(self, timeout_sec: float = 120.0) -> bool:
         start = self.get_clock().now()
         while rclpy.ok():
@@ -312,6 +323,7 @@ class RobotExplorer(Node):
                 return False
         return False
 
+    # Helper method to convert map cell indices to world coordinates (center of the cell)
     def _map_to_world(self, mx: int, my: int) -> tuple[float, float]:
         info = self.map_data.info
         wx = info.origin.position.x + (mx + 0.5) * info.resolution
@@ -374,8 +386,6 @@ def main(args = None):
                     (-2.9581028006218273, -0.8952083394225052),
                     (-3.3163698668480146, -1.275044404810225)]
 
-    #waypoints = re.get_waypoints_from_map(step=1.0)
-    #print(waypoints)
     re.cover_environment(waypoints_irl)
     re.get_logger().info("Exploration complete, shutting down.")
     re.destroy_node()
