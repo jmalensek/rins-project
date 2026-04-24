@@ -31,8 +31,8 @@ controller_server:
     use_realtime_priority: false
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      required_movement_radius: 0.15
+      movement_time_allowance: 6.0
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
@@ -59,7 +59,7 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.9  # Possible tweak to reduce collision safeguards
       regulated_linear_scaling_min_speed: 0.25  # Possible tweak to reduce collision safeguards
       use_rotate_to_heading: true
-      allow_reversing: false
+      allow_reversing: true
       rotate_to_heading_min_angle: 0.785
       max_angular_accel: 3.2
       max_robot_pose_search_dist: 10.0
