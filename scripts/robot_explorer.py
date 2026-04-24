@@ -135,6 +135,14 @@ class RobotExplorer(Node):
             self.cmd_vel_pub.publish(stop_msg)
             time.sleep(0.05)
 
+    # Rotates the robot in place by dividing a full circle into equal turns, with a wait time in between
+    def rotate(self, turns: int = 4, angular_speed: float = 0.5, wait_time: float = 1.0) -> None:
+            angle = (2 * math.pi) / turns
+
+            for _ in range(turns):
+                self.turn(angle, angular_speed)
+                time.sleep(wait_time)
+
     # Moves the robot to a specific pose on the map using Nav2's navigate_to_pose action
     def go_to_pose(self, x: float, y: float, yaw: float = 0.0) -> bool:
         # Wait for Nav2 action server
@@ -166,9 +174,11 @@ class RobotExplorer(Node):
     # NAVIGATION METHODS
 
     # Sequentially visits a set of waypoints on a provided map
-    def cover_environment(self, waypoints: list[tuple[float, float]]):
+    def cover_environment(self, waypoints: list[tuple[float, float]], turns: int = 4, angular_speed: float = 0.5, wait_time: float = 1.0) -> None:
         for x, y in waypoints:
             self.get_logger(). info(f"Navigating to waypoint ({x:.2f}, {y:.2f})")
+
+            self.rotate(turns, angular_speed, wait_time)
 
             if not self.go_to_pose(x, y):
                 self.get_logger().error(f"Failed to send goal to ({x:.2f}, {y:.2f})")
@@ -186,16 +196,13 @@ class RobotExplorer(Node):
                 return
 
     # Simple routine to localise the robot on the map
-    def localise_self(self, turns: int = 4, wait_time:float = 1.0) -> None:
+    def localise_self(self, turns: int = 4, angular_speed: float = 0.5, wait_time: float = 1.0) -> None:
         self.get_logger().info("Starting self-localization procedure...")
 
         while not self.is_localised():
             self.get_logger().info("Robot localising...")
 
-            angle = (2 * math.pi) / turns
-            for _ in range(turns):
-                self.turn(angle)
-                time.sleep(wait_time)
+            self.rotate(turns, angular_speed, wait_time)
         
     # NAVIGATION HELPER METHODS
 
@@ -360,7 +367,7 @@ def main(args = None):
         rclpy.shutdown()
         return
 
-    re.localise_self()
+    #re.localise_self()
 
     # hardcoded waypoints for the specific map
     waypoints = [(1.8396370262122645, -0.5751383533952286),
@@ -386,6 +393,7 @@ def main(args = None):
                     (-2.9581028006218273, -0.8952083394225052),
                     (-3.3163698668480146, -1.275044404810225)]
 
+    #re.rotate(turns=4, angular_speed=0.5, wait_time=1.0)
     re.cover_environment(waypoints_irl)
     re.get_logger().info("Exploration complete, shutting down.")
     re.destroy_node()
