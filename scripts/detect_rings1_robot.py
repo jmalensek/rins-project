@@ -269,8 +269,31 @@ class detect_rings(Node):
     
         return result
 
+    # Define these as class constants or pull from params
+    MAP_X_MIN, MAP_X_MAX = -5.0, 5.0
+    MAP_Y_MIN, MAP_Y_MAX = -5.0, 5.0
+    MAP_Z_MIN, MAP_Z_MAX =  0.0, 2.0  # z=0 is floor, z=2 is ceiling
+    MIN_DEPTH = 0.1   # metres — closer than this is almost certainly noise
+    MAX_DEPTH = 10.0  # metres — further than this is unreliable
+    
+    def _is_valid_position(self, cx, cy, cz):
+        """Return True if the centroid is within plausible map and depth bounds."""
+        if not (MAP_X_MIN <= cx <= MAP_X_MAX):
+            self.get_logger().warn(f"Centroid x={cx:.2f} out of map bounds, skipping.")
+            return False
+        if not (MAP_Y_MIN <= cy <= MAP_Y_MAX):
+            self.get_logger().warn(f"Centroid y={cy:.2f} out of map bounds, skipping.")
+            return False
+        if not (MAP_Z_MIN <= cz <= MAP_Z_MAX):
+            self.get_logger().warn(f"Centroid z={cz:.2f} out of map bounds, skipping.")
+            return False
+        depth = np.sqrt(cx**2 + cy**2 + cz**2)
+        if not (MIN_DEPTH <= depth <= MAX_DEPTH):
+            self.get_logger().warn(f"Centroid depth={depth:.2f}m out of valid range, skipping.")
+            return False
+        return True
 
-            
+
     def add_to_clusters(self, x, y, z, color):
         new_point = np.array([x, y, z])
         now_sec = self.get_clock().now().nanoseconds / 1e9
@@ -326,58 +349,61 @@ class detect_rings(Node):
         for i, cluster in enumerate(self.ring_clusters):
             if cluster["count"] < self.min_detections:
                 continue
-
-            self.get_logger().info(f"Publishing marker for cluster {i} at {cluster['centroid']} with count {cluster['count']}")
-
-            marker = Marker()
-
-            marker.header.frame_id = "map"
-
-            marker.type = 2  # could change
-            marker.id = i  # unique id per ring
-
+    
             cx, cy, cz = cluster["centroid"]
-
+    
+            # Validate position before publishing
+            if not self._is_valid_position(cx, cy, cz):
+                continue
+    
+            self.get_logger().info(
+                f"Publishing marker for cluster {i} at ({cx:.2f}, {cy:.2f}, {cz:.2f}) "
+                f"with count {cluster['count']}"
+            )
+    
+            marker = Marker()
+            marker.header.frame_id = "map"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.type = Marker.SPHERE
+            marker.id = i
             marker.pose.position.x = cx
             marker.pose.position.y = cy
             marker.pose.position.z = cz
-
             marker.pose.orientation.w = 1.0
-
-            marker.header.stamp = self.get_clock().now().to_msg()
-
-            # Set the scale of the marker
-            scale = 0.25  # 15 cm
+    
+            scale = 0.25
             marker.scale.x = scale
             marker.scale.y = scale
             marker.scale.z = scale
-
-            # Set the color
+    
             color = cluster.get("color")
             if color:
                 r_val, g_val, b_val = self.lab_to_marker_rgb(color["lab"])
+                name = color["name"]
             else:
-                r_val, g_val, b_val = 0.0, 1.0, 1.0 
-
+                r_val, g_val, b_val = 0.0, 1.0, 1.0
+                name = "unknown"
+    
             marker.color.r = r_val
             marker.color.g = g_val
             marker.color.b = b_val
             marker.color.a = 1.0
-
+    
             self.marker_pub.publish(marker)
-            
-            name = color["name"] if color else "unknown"
+    
             if name not in self.detected_colors:
                 self.detected_colors.add(name)
-
-            if len(self.detected_colors) >= 10:
-                self.get_logger().info(f"Detected 4 rings with colors: {', '.join(self.detected_colors)}. Publishing finished signal.")
+    
+            if len(self.detected_colors) >= 4:  # was 10, but you said 4 rings
+                self.get_logger().info(
+                    f"Detected 4 rings with colors: {', '.join(self.detected_colors)}. "
+                    f"Publishing finished signal."
+                )
                 self.finished_pub.publish(Bool(data=True))
                 self.get_logger().info("Done. Published /finished=True. Shutting down node.")
-
-                # Optionally, stop further processing or exit
                 rclpy.shutdown()
                 return
+
             
     def detect_ring_color(self, cv_image, cx, cy, r):
         h_img, w_img = cv_image.shape[:2]
