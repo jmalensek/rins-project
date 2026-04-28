@@ -496,9 +496,9 @@ class detect_rings(Node):
     
         # --- Achromatic colors (low chroma) ---
         if chroma < 15:
-            if L < 25:
+            if L < 15:
                 return "black"
-            elif L > 75:
+            elif L > 95:
                 return "white"
             else:
                 return "unknown"
@@ -506,18 +506,18 @@ class detect_rings(Node):
         # --- Chromatic colors — use hue angle ---
         hue = np.degrees(np.arctan2(B, A)) % 360
 
-        if hue < 22 or hue >= 330:
+        if hue < 42 or hue >= 330:
             return "red"
-        elif 22 <= hue < 75:
+        elif 42 <= hue < 75:
             return "yellow"
-        elif 75 <= hue < 165:
+        elif 75 <= hue < 145:
             # Extra guard: true green has positive B, blue has negative B
             if B > 0 and A < 10:
                 return "green"
             elif B <= 5:
                 return "blue"   # shifted blue caught in green range
             return "green"
-        elif 165 <= hue < 260:
+        elif 145 <= hue < 260:
             return "blue"
         else:
             return "unknown"
